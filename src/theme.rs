@@ -1,4 +1,4 @@
-//! Shared colors and egui style for the desktop interface.
+//! 桌面界面共用的颜色与 egui 样式。
 use eframe::egui;
 
 pub(crate) const INK: egui::Color32 = egui::Color32::from_rgb(31, 45, 58);
@@ -11,7 +11,9 @@ pub(crate) const BORDER: egui::Color32 = egui::Color32::from_rgb(222, 230, 235);
 
 /// Apply the app-wide light palette and comfortable spacing once at startup.
 pub(crate) fn apply(ctx: &egui::Context) {
+    // 复制当前浅色样式，保留间距等未打算修改的默认设置。
     let mut style = (*ctx.style_of(egui::Theme::Light)).clone();
+    // `visuals` 控制颜色和控件状态；下面的 `spacing` 控制布局间距。
     style.visuals = egui::Visuals::light();
     style.visuals.panel_fill = CANVAS;
     style.visuals.window_fill = SURFACE;
@@ -41,6 +43,7 @@ pub(crate) fn apply(ctx: &egui::Context) {
 }
 
 pub(crate) fn card() -> egui::Frame {
+    // 返回可复用的卡片外框，让二维码结果共用相同底色、边框和圆角。
     egui::Frame::group(&egui::Style::default())
         .fill(SURFACE)
         .stroke(egui::Stroke::new(1.0, BORDER))

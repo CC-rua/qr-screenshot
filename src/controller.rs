@@ -5,7 +5,7 @@ use std::sync::{
 };
 
 use crate::{
-    model::AppModel,
+    model::{AppModel, MainTab},
     services::{qr_decoder, qr_generator, screen_capture},
     theme,
     view::{self, MainAction, OverlayAction},
@@ -18,14 +18,22 @@ pub struct QrController {
     #[cfg(windows)]
     _tray_icon: Option<tray_icon::TrayIcon>,
     exit_requested: Arc<AtomicBool>,
+    /// 托盘回调写入请求，UI 线程在下一帧取走；AtomicBool 是只含一个待处理状态的轻量邮箱。
+    capture_requested: Arc<AtomicBool>,
 }
 
 impl QrController {
     pub fn new(main_hwnd: Option<isize>, ctx: &egui::Context) -> Self {
         theme::apply(ctx);
         let exit_requested = Arc::new(AtomicBool::new(false));
+        // Arc 让控制器与托盘回调共享同一个原子标记，无需让回调持有控制器本身。
+        let capture_requested = Arc::new(AtomicBool::new(false));
         #[cfg(windows)]
-        let tray_icon = match crate::system_tray::create(ctx.clone(), Arc::clone(&exit_requested)) {
+        let tray_icon = match crate::system_tray::create(
+            ctx.clone(),
+            Arc::clone(&exit_requested),
+            Arc::clone(&capture_requested),
+        ) {
             Ok(icon) => Some(icon),
             Err(error) => {
                 eprintln!("无法创建系统托盘图标：{error}");
@@ -45,6 +53,7 @@ impl QrController {
             #[cfg(windows)]
             _tray_icon: tray_icon,
             exit_requested,
+            capture_requested,
         }
     }
 
@@ -280,6 +289,12 @@ impl eframe::App for QrController {
             && ctx.input(|input| input.viewport().minimized.unwrap_or(false))
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+
+        // swap 同时读取并清零请求，因此每次托盘点击只会启动一次截图流程。
+        if self.capture_requested.swap(false, Ordering::SeqCst) {
+            self.model.active_tab = MainTab::Scan;
+            self.begin_capture(&ctx);
         }
 
         if let Some(action) = view::draw_main(&mut self.model, _ui) {

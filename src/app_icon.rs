@@ -1,4 +1,4 @@
-//! Shared QR scanner icon used by the app window and Windows tray.
+//! 主窗口与 Windows 托盘共用的二维码图标。
 use eframe::egui;
 
 const BACKGROUND: [u8; 4] = [20, 126, 128, 255];
@@ -7,6 +7,7 @@ const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
 
 pub(crate) fn icon_data() -> egui::IconData {
     let size = 128;
+    // egui 的图标数据按行保存 RGBA 字节，并单独记录图像的像素宽高。
     egui::IconData {
         rgba: rgba(size),
         width: size,
@@ -16,11 +17,14 @@ pub(crate) fn icon_data() -> egui::IconData {
 
 pub(crate) fn rgba(size: u32) -> Vec<u8> {
     let mut pixels = vec![0; (size * size * 4) as usize];
+    // 图案使用 21×21 个二维码单元，四周各留两格边距。
+    // `unit` 把逻辑单元缩放到不同尺寸，因此窗口和 32px 托盘图标能复用同一份图案。
     let unit = size as f32 / 25.0;
     let corner_radius = size as f32 * 0.22;
 
     for y in 0..size {
         for x in 0..size {
+            // 圆角方块以外保持透明，让 Windows 按圆角形状显示图标。
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
             let dx = if px < corner_radius {
@@ -43,6 +47,7 @@ pub(crate) fn rgba(size: u32) -> Vec<u8> {
                 TRANSPARENT
             };
 
+            // 把像素坐标换算成二维码单元坐标；减去 2 是因为图案前面留了两格边距。
             let grid_x = ((px / unit).floor() as i32) - 2;
             let grid_y = ((py / unit).floor() as i32) - 2;
             if (0..21).contains(&grid_x)
@@ -52,6 +57,7 @@ pub(crate) fn rgba(size: u32) -> Vec<u8> {
                 color = MODULE;
             }
 
+            // 一个像素连续占四个字节，顺序为红、绿、蓝、透明度。
             let offset = ((y * size + x) * 4) as usize;
             pixels[offset..offset + 4].copy_from_slice(&color);
         }
@@ -61,6 +67,7 @@ pub(crate) fn rgba(size: u32) -> Vec<u8> {
 }
 
 fn is_qr_module(x: i32, y: i32) -> bool {
+    // 三个 7×7 定位图案对应二维码常见的三个角。
     for (left, top) in [(0, 0), (14, 0), (0, 14)] {
         let dx = x - left;
         let dy = y - top;
@@ -73,6 +80,6 @@ fn is_qr_module(x: i32, y: i32) -> bool {
         }
     }
 
-    // A stable, high-contrast pattern fills the data area without pretending to encode content.
+    // 用固定图案填充数据区；这是装饰图标，不代表它编码了真实内容。
     (x * 7 + y * 11 + x * y * 3) % 13 < 6
 }

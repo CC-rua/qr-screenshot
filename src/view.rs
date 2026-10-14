@@ -27,6 +27,8 @@ pub(crate) enum OverlayAction {
 /// `&mut AppModel` 是可变借用：视图可以编辑输入框和当前选项，但不取得模型所有权。
 /// 教学笔记：[借用与可变性](../learning-notes/rust-java-differences.md#ownership-borrowing)。
 pub(crate) fn draw_main(model: &mut AppModel, ui: &mut egui::Ui) -> Option<MainAction> {
+    // A bottom panel reserves its own fixed height before the active page uses the remaining area.
+    // This keeps navigation anchored when switching between pages with different content heights.
     egui::Panel::bottom("main_tab_bar")
         .exact_size(52.0)
         .show(ui, |ui| {
@@ -100,6 +102,7 @@ fn draw_scan_tab(model: &mut AppModel, ui: &mut egui::Ui) -> Option<MainAction> 
             }
             for (index, content) in model.results.iter().enumerate() {
                 theme::card().show(ui, |ui| {
+                    // Wrapped horizontal layout keeps the copy button after the text, including long results.
                     ui.horizontal_wrapped(|ui| {
                         ui.add(egui::Label::new(content).wrap());
                         if ui.small_button("复制").clicked() {

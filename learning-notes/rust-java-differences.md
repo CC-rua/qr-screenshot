@@ -160,6 +160,31 @@ let label = |index| format!("{prefix} {}", index + 1);
 
 托盘菜单等长期回调通常要求 `'static`，即闭包不能借用一个可能先于它销毁的局部变量；因此通过 `Arc` 把需要的共享所有权交给回调。`Fn` 是回调可重复调用的 trait 约束，与 Java 函数式接口的使用场景相近。项目的托盘回调用 `move` 保存 egui 上下文和退出标记，见 `src/system_tray.rs`。
 
+<a id="arc-atomicbool"></a>
+
+### 用 `Arc<AtomicBool>` 把托盘事件交给 UI 线程
+
+托盘菜单回调和 `QrController::ui` 属于不同的事件路径。托盘回调不能直接借用 UI 线程正在使用的控制器，所以项目用一个共享布尔值传递“有一次截图请求待处理”：
+
+```rust
+// 托盘菜单回调：写入请求，并唤醒 egui。
+capture_requested.store(true, Ordering::SeqCst);
+ctx.request_repaint();
+
+// 控制器 UI 帧：读取请求并清零，确保不会重复处理。
+if self.capture_requested.swap(false, Ordering::SeqCst) {
+    self.begin_capture(ctx);
+}
+```
+
+- `AtomicBool` 提供跨线程安全的布尔读写，不需要像 `Mutex<bool>` 那样加锁。
+- `Arc` 让托盘回调和控制器持有同一个原子值；克隆 `Arc` 只复制共享句柄。
+- `store(true, ...)` 发布待处理状态；`swap(false, ...)` 一次性取走状态并清零。
+- `Ordering::SeqCst` 选择最直观的顺序一致性。它让多线程对原子操作采用统一顺序；更复杂的高性能代码才需要评估较弱的内存顺序。
+- `request_repaint()` 只是请求框架运行下一帧，不会在回调里直接执行 UI。控制器在那一帧中消费标记、切回截图页并开始截图。
+
+这种单一布尔标记适合“有/无一项待处理请求”，连续多次点击会合并成一个待处理状态。如果以后需要排队保留每个事件或携带参数，应考虑消息通道（例如 `std::sync::mpsc`），而不是继续扩展布尔标记。
+
 <a id="arc-mutex"></a>
 
 ## 9. `Arc<Mutex<T>>` 与线程安全共享
