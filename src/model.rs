@@ -1,6 +1,9 @@
 use eframe::egui;
 use image::RgbaImage;
-use std::{sync::{Arc, Mutex}, time::Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 /// 主窗口当前显示的工作区。
 #[derive(Clone, Copy, Default, PartialEq, Eq)]

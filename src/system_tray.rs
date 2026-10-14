@@ -21,7 +21,7 @@ pub fn create(ctx: egui::Context, exit_requested: Arc<AtomicBool>) -> Result<Tra
     let menu = Menu::with_items(&[&show_window, &exit_app])
         .map_err(|error| format!("创建托盘菜单失败：{error}"))?;
 
-    let icon = Icon::from_rgba(create_icon_pixels(), 32, 32)
+    let icon = Icon::from_rgba(crate::app_icon::rgba(32), 32, 32)
         .map_err(|error| format!("创建托盘图标失败：{error}"))?;
     let tray_icon = TrayIconBuilder::new()
         .with_tooltip("桌面二维码识别")
@@ -68,37 +68,4 @@ fn restore_window(ctx: &egui::Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     ctx.request_repaint();
-}
-
-/// 返回 32×32 的 RGBA 图标：绿色底色上画一个简洁的二维码定位图案。
-fn create_icon_pixels() -> Vec<u8> {
-    let mut pixels = vec![0; 32 * 32 * 4];
-    for y in 0..32 {
-        for x in 0..32 {
-            let is_finder = [(4, 4), (20, 4), (4, 20)].iter().any(|(left, top)| {
-                let dx = x as i32 - *left;
-                let dy = y as i32 - *top;
-                (0..8).contains(&dx)
-                    && (0..8).contains(&dy)
-                    && (dx == 0
-                        || dx == 7
-                        || dy == 0
-                        || dy == 7
-                        || (2..=5).contains(&dx) && (2..=5).contains(&dy))
-            });
-            let is_data = (x == 17 && y >= 19 && y <= 26)
-                || (y == 17 && x >= 19 && x <= 26)
-                || (x == 23 && y == 21)
-                || (x == 20 && y == 25)
-                || (x == 27 && y == 27);
-            let color = if is_finder || is_data {
-                [255, 255, 255, 255]
-            } else {
-                [32, 145, 92, 255]
-            };
-            let offset = (y * 32 + x) * 4;
-            pixels[offset..offset + 4].copy_from_slice(&color);
-        }
-    }
-    pixels
 }

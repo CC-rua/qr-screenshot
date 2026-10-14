@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use crate::model::{AppModel, MainTab, OverlayState};
+use crate::theme;
 
 /// 主窗口把用户操作交给控制器处理，不在视图中直接调用截图或二维码服务。
 ///
@@ -10,7 +11,6 @@ use crate::model::{AppModel, MainTab, OverlayState};
 /// 教学笔记：[枚举与 match](../learning-notes/rust-java-differences.md#enum-match)。
 pub(crate) enum MainAction {
     BeginCapture,
-    MinimizeToTray,
     GenerateQr,
     SaveQr,
     CopyResult(usize),
@@ -27,58 +27,40 @@ pub(crate) enum OverlayAction {
 /// `&mut AppModel` 是可变借用：视图可以编辑输入框和当前选项，但不取得模型所有权。
 /// 教学笔记：[借用与可变性](../learning-notes/rust-java-differences.md#ownership-borrowing)。
 pub(crate) fn draw_main(model: &mut AppModel, ui: &mut egui::Ui) -> Option<MainAction> {
-    let mut action = None;
-
-    ui.set_max_width(760.0);
-    ui.vertical(|ui| {
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            ui.heading("桌面二维码识别");
-            ui.with_layout(
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    if ui.button("最小化到系统托盘").clicked() {
-                        action = Some(MainAction::MinimizeToTray);
-                    }
-                },
-            );
-        });
-        ui.label("在屏幕上框选二维码，也可以输入文字生成二维码图片。");
-        ui.add_space(12.0);
-
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut model.active_tab, MainTab::Scan, "截图识别");
-            ui.selectable_value(&mut model.active_tab, MainTab::Generate, "生成二维码");
-        });
-        ui.separator();
-
-        // match 根据当前标签选择一个界面。每个标签只负责展示并返回动作。
-        match model.active_tab {
-            MainTab::Scan => {
-                if action.is_none() {
-                    action = draw_scan_tab(model, ui);
+    egui::Panel::bottom("main_tab_bar")
+        .exact_size(52.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let tab_width = (ui.available_width() - ui.spacing().item_spacing.x) * 0.5;
+                if ui
+                    .add_sized(
+                        [tab_width, 42.0],
+                        egui::Button::selectable(model.active_tab == MainTab::Scan, "截图识别"),
+                    )
+                    .clicked()
+                {
+                    model.active_tab = MainTab::Scan;
                 }
-            }
-            MainTab::Generate => {
-                if action.is_none() {
-                    action = draw_generate_tab(model, ui);
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 42.0],
+                        egui::Button::selectable(
+                            model.active_tab == MainTab::Generate,
+                            "生成二维码",
+                        ),
+                    )
+                    .clicked()
+                {
+                    model.active_tab = MainTab::Generate;
                 }
-            }
-        }
-
-        ui.add_space(8.0);
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            ui.strong("状态");
-            if model.status.is_empty() {
-                ui.label("就绪");
-            } else {
-                ui.label(&model.status);
-            }
+            });
         });
-    });
 
-    // 复制按钮的短暂反馈由模型保存截止时间，避免把计时逻辑塞进按钮闭包。
+    let action = match model.active_tab {
+        MainTab::Scan => draw_scan_tab(model, ui),
+        MainTab::Generate => draw_generate_tab(model, ui),
+    };
+
     if let Some(MainAction::CopyResult(index)) = action.as_ref() {
         model.copied_result = Some(*index);
         model.copy_feedback_until = Some(Instant::now() + Duration::from_secs(2));
@@ -96,33 +78,31 @@ pub(crate) fn draw_main(model: &mut AppModel, ui: &mut egui::Ui) -> Option<MainA
 }
 
 fn draw_scan_tab(model: &mut AppModel, ui: &mut egui::Ui) -> Option<MainAction> {
-    if ui
-        .button("框选并识别二维码")
-        .on_hover_text("主窗口会暂时隐藏，之后拖动鼠标框选屏幕区域。")
+    ui.add_space(12.0);
+    let action = ui
+        .add_sized(
+            [ui.available_width(), 48.0],
+            egui::Button::new("截图识别")
+                .fill(theme::ACCENT)
+                .stroke(egui::Stroke::NONE),
+        )
         .clicked()
-    {
-        return Some(MainAction::BeginCapture);
-    }
-
-    ui.add_space(8.0);
-    ui.label("识别结果");
-
-    if model.results.is_empty() {
-        ui.group(|ui| {
-            ui.label("尚无识别结果。点击上方按钮，然后拖动鼠标框选二维码。");
-        });
-        return None;
-    }
+        .then_some(MainAction::BeginCapture);
+    ui.add_space(10.0);
 
     let mut copy_action = None;
     egui::ScrollArea::vertical()
-        .max_height(360.0)
+        .auto_shrink([false, false])
         .show(ui, |ui| {
+            if model.results.is_empty() {
+                ui.label(egui::RichText::new("暂无结果").color(theme::MUTED));
+                return;
+            }
             for (index, content) in model.results.iter().enumerate() {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.strong(format!("二维码 {}", index + 1));
-                        if ui.button("复制内容").clicked() {
+                theme::card().show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add(egui::Label::new(content).wrap());
+                        if ui.small_button("复制").clicked() {
                             copy_action = Some(MainAction::CopyResult(index));
                         }
                         if model.copied_result == Some(index)
@@ -133,42 +113,57 @@ fn draw_scan_tab(model: &mut AppModel, ui: &mut egui::Ui) -> Option<MainAction> 
                             ui.label("已复制");
                         }
                     });
-                    ui.add(egui::Label::new(content).wrap());
                 });
-                ui.add_space(4.0);
+                ui.add_space(6.0);
             }
         });
 
-    copy_action
+    copy_action.or(action)
 }
 
 fn draw_generate_tab(model: &mut AppModel, ui: &mut egui::Ui) -> Option<MainAction> {
-    ui.label("输入文本或网址，然后生成二维码：");
-    ui.add(
-        egui::TextEdit::multiline(&mut model.qr_text)
-            .desired_rows(3)
-            .hint_text("例如：https://example.com"),
+    ui.add_space(12.0);
+    ui.add_sized(
+        [ui.available_width(), 180.0],
+        egui::TextEdit::multiline(&mut model.qr_text),
     );
+    ui.add_space(10.0);
+    let mut action = ui
+        .add_sized(
+            [ui.available_width(), 48.0],
+            egui::Button::new("生成二维码")
+                .fill(theme::ACCENT)
+                .stroke(egui::Stroke::NONE),
+        )
+        .clicked()
+        .then_some(MainAction::GenerateQr);
 
-    let mut action = None;
-    ui.horizontal(|ui| {
-        if ui.button("生成二维码").clicked() {
-            action = Some(MainAction::GenerateQr);
-        }
-        if model.generated_qr.is_some() && ui.button("另存为 PNG…").clicked() {
+    if model.generated_qr.is_some() {
+        ui.add_space(8.0);
+        if ui
+            .add_sized(
+                [ui.available_width(), 42.0],
+                egui::Button::new("另存为 PNG"),
+            )
+            .clicked()
+        {
             action = Some(MainAction::SaveQr);
         }
-    });
+    }
 
     if let Some(texture) = model.generated_qr_texture.as_ref() {
-        ui.add_space(8.0);
-        ui.group(|ui| {
-            ui.label("二维码预览");
-            let source_size = texture.size_vec2();
-            let scale = (240.0 / source_size.x.max(source_size.y)).min(1.0);
-            let preview_size = source_size * scale;
+        ui.add_space(12.0);
+        let max_size = ui
+            .available_width()
+            .min(ui.available_height())
+            .min(240.0)
+            .max(1.0);
+        let source_size = texture.size_vec2();
+        let scale = (max_size / source_size.x.max(source_size.y)).min(1.0);
+        ui.vertical_centered(|ui| {
             ui.add(
-                egui::Image::new((texture.id(), source_size)).fit_to_exact_size(preview_size),
+                egui::Image::new((texture.id(), source_size))
+                    .fit_to_exact_size(source_size * scale),
             );
         });
     }
@@ -202,8 +197,7 @@ pub(crate) fn draw_selection_overlay(
         }
     }
 
-    let (Some(screenshot), Some(texture)) =
-        (overlay.screenshot.as_ref(), overlay.texture.as_ref())
+    let (Some(screenshot), Some(texture)) = (overlay.screenshot.as_ref(), overlay.texture.as_ref())
     else {
         return None;
     };
@@ -246,7 +240,12 @@ pub(crate) fn draw_selection_overlay(
 
     if let Some(selection) = current_selection(overlay) {
         // 再绘制选区内未变暗的截图，让用户清楚看到框选边界。
-        painter.image(texture.id(), selection, uv_for_rect(selection, screen_rect), egui::Color32::WHITE);
+        painter.image(
+            texture.id(),
+            selection,
+            uv_for_rect(selection, screen_rect),
+            egui::Color32::WHITE,
+        );
         painter.rect_stroke(
             selection,
             egui::CornerRadius::ZERO,

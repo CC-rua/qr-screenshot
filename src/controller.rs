@@ -7,6 +7,7 @@ use std::sync::{
 use crate::{
     model::AppModel,
     services::{qr_decoder, qr_generator, screen_capture},
+    theme,
     view::{self, MainAction, OverlayAction},
 };
 
@@ -21,6 +22,7 @@ pub struct QrController {
 
 impl QrController {
     pub fn new(main_hwnd: Option<isize>, ctx: &egui::Context) -> Self {
+        theme::apply(ctx);
         let exit_requested = Arc::new(AtomicBool::new(false));
         #[cfg(windows)]
         let tray_icon = match crate::system_tray::create(ctx.clone(), Arc::clone(&exit_requested)) {
@@ -153,15 +155,6 @@ impl QrController {
     fn handle_main_action(&mut self, action: MainAction, ctx: &egui::Context) {
         match action {
             MainAction::BeginCapture => self.begin_capture(ctx),
-            MainAction::MinimizeToTray =>
-            {
-                #[cfg(windows)]
-                if self._tray_icon.is_some() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                } else {
-                    self.model.status = "系统托盘不可用，无法隐藏窗口。".to_owned();
-                }
-            }
             MainAction::GenerateQr => match qr_generator::generate(&self.model.qr_text) {
                 Ok(image) => {
                     let color_image = egui::ColorImage::from_gray(

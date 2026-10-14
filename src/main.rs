@@ -1,11 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 // 教学笔记：[模块声明与 use](../learning-notes/rust-java-differences.md#modules-use)。
+mod app_icon;
 mod controller;
 mod model;
 mod services;
 #[cfg(windows)]
 mod system_tray;
+mod theme;
 mod view;
 
 use controller::QrController;
@@ -16,7 +18,13 @@ use std::{path::PathBuf, sync::Arc};
 fn main() -> eframe::Result {
     eframe::run_native(
         "桌面二维码识别",
-        eframe::NativeOptions::default(),
+        eframe::NativeOptions {
+            viewport: eframe::egui::ViewportBuilder::default()
+                .with_inner_size([460.0, 600.0])
+                .with_resizable(false)
+                .with_icon(Arc::new(app_icon::icon_data())),
+            ..Default::default()
+        },
         Box::new(|creation_context| {
             let system_font_found = install_system_chinese_font(&creation_context.egui_ctx);
             // `window_handle` 来自 HasWindowHandle trait；Rust 要把 trait 引入作用域才能调用其方法。
