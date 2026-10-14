@@ -16,7 +16,7 @@ pub(crate) enum MainAction {
     CopyResult(usize),
 }
 
-/// 选区窗口只报告完成或取消；关闭窗口和恢复主窗口由控制器负责。
+/// 选区遮罩只报告完成或取消；窗口状态恢复由控制器负责。
 pub(crate) enum OverlayAction {
     Completed,
     Cancelled,
@@ -276,7 +276,7 @@ pub(crate) fn draw_selection_overlay(
         }
     }
 
-    // 选区窗口需要持续刷新，才能跟随拖动指针重绘矩形。
+    // 遮罩需要持续刷新，才能跟随拖动指针重绘矩形。
     ui.ctx().request_repaint();
     None
 }

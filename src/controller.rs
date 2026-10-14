@@ -1,8 +1,5 @@
 use eframe::egui;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 
 use crate::{
     model::{AppModel, MainTab},
@@ -16,44 +13,27 @@ pub struct QrController {
     model: AppModel,
     main_hwnd: Option<isize>,
     #[cfg(windows)]
-    _tray_icon: Option<tray_icon::TrayIcon>,
-    exit_requested: Arc<AtomicBool>,
-    /// 托盘回调写入请求，UI 线程在下一帧取走；AtomicBool 是只含一个待处理状态的轻量邮箱。
-    capture_requested: Arc<AtomicBool>,
+    capture_event: Option<crate::system_tray::OwnedHandle>,
+    #[cfg(windows)]
+    start_capture: bool,
 }
 
 impl QrController {
-    pub fn new(main_hwnd: Option<isize>, ctx: &egui::Context) -> Self {
+    pub fn new(
+        main_hwnd: Option<isize>,
+        ctx: &egui::Context,
+        #[cfg(windows)] capture_event: Option<crate::system_tray::OwnedHandle>,
+        #[cfg(windows)] start_capture: bool,
+    ) -> Self {
         theme::apply(ctx);
-        let exit_requested = Arc::new(AtomicBool::new(false));
-        // Arc 让控制器与托盘回调共享同一个原子标记，无需让回调持有控制器本身。
-        let capture_requested = Arc::new(AtomicBool::new(false));
-        #[cfg(windows)]
-        let tray_icon = match crate::system_tray::create(
-            ctx.clone(),
-            Arc::clone(&exit_requested),
-            Arc::clone(&capture_requested),
-        ) {
-            Ok(icon) => Some(icon),
-            Err(error) => {
-                eprintln!("无法创建系统托盘图标：{error}");
-                None
-            }
-        };
-
-        let mut model = AppModel::default();
-        #[cfg(windows)]
-        if tray_icon.is_none() {
-            model.status = "系统托盘初始化失败，最小化/关闭窗口将直接退出应用。".to_owned();
-        }
 
         Self {
-            model,
+            model: AppModel::default(),
             main_hwnd,
             #[cfg(windows)]
-            _tray_icon: tray_icon,
-            exit_requested,
-            capture_requested,
+            capture_event,
+            #[cfg(windows)]
+            start_capture,
         }
     }
 
@@ -61,7 +41,7 @@ impl QrController {
         self.model.status = status.to_owned();
     }
 
-    /// 开始“隐藏窗口 -> 截图 -> 显示选区”的异步流程。
+    /// 隐藏当前窗口、截图，再用当前窗口显示选区遮罩。
     fn begin_capture(&mut self, ctx: &egui::Context) {
         self.model.status = "正在捕获屏幕……".to_owned();
         self.model.results.clear();
@@ -95,10 +75,24 @@ impl QrController {
                         overlay.texture = None;
                         overlay.active = true;
                     }
-                    let overlay_id = egui::ViewportId::from_hash_of("qr-selection-overlay");
+                    repaint_context.send_viewport_cmd_to(
+                        egui::ViewportId::ROOT,
+                        egui::ViewportCommand::Decorations(false),
+                    );
+                    repaint_context.send_viewport_cmd_to(
+                        egui::ViewportId::ROOT,
+                        egui::ViewportCommand::Fullscreen(true),
+                    );
+                    repaint_context.send_viewport_cmd_to(
+                        egui::ViewportId::ROOT,
+                        egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop),
+                    );
+                    repaint_context.send_viewport_cmd_to(
+                        egui::ViewportId::ROOT,
+                        egui::ViewportCommand::Visible(true),
+                    );
                     repaint_context
-                        .send_viewport_cmd_to(overlay_id, egui::ViewportCommand::Visible(true));
-                    repaint_context.send_viewport_cmd_to(overlay_id, egui::ViewportCommand::Focus);
+                        .send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 }
                 Err(error) => {
                     if let Ok(mut overlay) = overlay_state.lock() {
@@ -111,7 +105,7 @@ impl QrController {
         });
     }
 
-    /// 读取选区窗口送回的一次性事件，并在主线程中执行解码。
+    /// 读取选区遮罩送回的一次性事件，并在主线程中执行解码。
     fn collect_overlay_result(&mut self) {
         let (completed, cancelled, capture_error) = match self.model.overlay.lock() {
             Ok(mut overlay) => {
@@ -128,7 +122,7 @@ impl QrController {
                 (completed, cancelled, capture_error)
             }
             Err(_) => {
-                self.model.status = "选区窗口状态读取失败。".to_owned();
+                self.model.status = "选区状态读取失败。".to_owned();
                 return;
             }
         };
@@ -223,38 +217,17 @@ impl QrController {
         self.model.status = "文件另存为窗口目前仅在 Windows 上提供。".to_owned();
     }
 
-    /// 声明预创建的全屏选区 viewport，并将视图返回的动作交给控制器处理。
-    fn show_selection_viewport(&self, ctx: &egui::Context) {
-        let viewport_id = egui::ViewportId::from_hash_of("qr-selection-overlay");
-        let viewport_builder = egui::ViewportBuilder::default()
-            .with_title("选择二维码区域")
-            .with_fullscreen(true)
-            .with_decorations(false)
-            .with_resizable(false)
-            .with_window_level(egui::WindowLevel::AlwaysOnTop)
-            .with_visible(false);
-        let overlay_state = Arc::clone(&self.model.overlay);
-        let main_hwnd = self.main_hwnd;
-
-        // 该闭包稍后由 eframe 调用；move 让它拥有共享状态 Arc 和窗口句柄。
-        // 教学笔记：[闭包与 move](../learning-notes/rust-java-differences.md#closures-move)。
-        ctx.show_viewport_deferred(viewport_id, viewport_builder, move |ui, _class| {
-            let action = overlay_state
-                .lock()
-                .ok()
-                .and_then(|mut overlay| view::draw_selection_overlay(ui, &mut overlay));
-            if let Some(action) = action {
-                Self::finish_selection_viewport(ui.ctx(), main_hwnd, action);
-            }
-        });
-    }
-
     fn finish_selection_viewport(
         ctx: &egui::Context,
         main_hwnd: Option<isize>,
         action: OverlayAction,
     ) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            egui::WindowLevel::Normal,
+        ));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(460.0, 600.0)));
         screen_capture::restore_main_window(ctx, main_hwnd);
         if matches!(action, OverlayAction::Completed) {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -269,37 +242,41 @@ impl eframe::App for QrController {
         self.collect_overlay_result();
         let ctx = _ui.ctx().clone();
 
-        // 标题栏关闭按钮默认会结束进程；改为隐藏窗口，托盘菜单的“退出”仍可正常关闭。
-        if ctx.input(|input| input.viewport().close_requested()) {
-            let exiting_from_tray = self.exit_requested.swap(false, Ordering::SeqCst);
-            #[cfg(windows)]
-            let can_hide_to_tray = self._tray_icon.is_some();
-            #[cfg(not(windows))]
-            let can_hide_to_tray = false;
-
-            if !exiting_from_tray && can_hide_to_tray {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            }
-        }
-
-        // Windows 标题栏的最小化按钮也会转为隐藏到托盘。
+        // 主窗口最小化时结束 UI 进程，交给常驻托盘宿主按需重新启动。
         #[cfg(windows)]
-        if self._tray_icon.is_some()
-            && ctx.input(|input| input.viewport().minimized.unwrap_or(false))
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        if ctx.input(|input| input.viewport().minimized.unwrap_or(false)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
         }
 
-        // swap 同时读取并清零请求，因此每次托盘点击只会启动一次截图流程。
-        if self.capture_requested.swap(false, Ordering::SeqCst) {
+        #[cfg(windows)]
+        if std::mem::take(&mut self.start_capture) {
+            self.begin_capture(&ctx);
+        }
+
+        #[cfg(windows)]
+        if crate::system_tray::take_capture_request(self.capture_event.as_ref()) {
             self.model.active_tab = MainTab::Scan;
             self.begin_capture(&ctx);
         }
 
-        if let Some(action) = view::draw_main(&mut self.model, _ui) {
-            self.handle_main_action(action, &ctx);
+        let overlay_action = self
+            .model
+            .overlay
+            .lock()
+            .ok()
+            .and_then(|mut overlay| view::draw_selection_overlay(_ui, &mut overlay));
+        if let Some(action) = overlay_action {
+            Self::finish_selection_viewport(&ctx, self.main_hwnd, action);
+        } else if !self
+            .model
+            .overlay
+            .lock()
+            .is_ok_and(|overlay| overlay.active)
+        {
+            if let Some(action) = view::draw_main(&mut self.model, _ui) {
+                self.handle_main_action(action, &ctx);
+            }
         }
-        self.show_selection_viewport(&ctx);
     }
 }

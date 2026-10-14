@@ -1,85 +1,276 @@
-use eframe::egui;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-use tray_icon::{
-    Icon, TrayIcon, TrayIconBuilder,
-    menu::{Menu, MenuEvent, MenuItem},
+//! Lightweight Windows tray host. The eframe UI runs in a separate process on demand.
+use std::{
+    process::{Child, Command},
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
 };
 
+use tray_icon::{
+    Icon, TrayIconBuilder, TrayIconEvent,
+    menu::{Menu, MenuEvent, MenuItem},
+};
+use windows::{
+    Win32::{
+        Foundation::{CloseHandle, GetLastError, HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WPARAM},
+        System::Threading::{
+            CreateEventW, CreateMutexW, EVENT_MODIFY_STATE, OpenEventW,
+            SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForSingleObject,
+        },
+        UI::WindowsAndMessaging::{
+            DispatchMessageW, FindWindowW, GetMessageW, MSG, PostMessageW, PostQuitMessage,
+            SW_RESTORE, SetForegroundWindow, ShowWindow, TranslateMessage, WM_CLOSE,
+        },
+    },
+    core::PCWSTR,
+};
+
+const HOST_MUTEX: &str = "Local\\qr-screenshot-tray-host";
+const UI_MUTEX: &str = "Local\\qr-screenshot-ui";
+const CAPTURE_EVENT: &str = "Local\\qr-screenshot-capture";
+const WINDOW_TITLE: &str = "桌面二维码识别";
 const SHOW_WINDOW_ID: &str = "show-window";
 const CAPTURE_SCAN_ID: &str = "capture-scan";
 const EXIT_APP_ID: &str = "exit-app";
 
-/// 创建 Windows 通知区域图标，并将恢复/退出菜单接回 egui 窗口。
-///
-/// 托盘对象必须保存在控制器里；离开作用域并析构后，Windows 会移除图标。
-/// 教学笔记：[闭包与回调所有权](../learning-notes/rust-java-differences.md#closures-move)、[原子请求标记](../learning-notes/rust-java-differences.md#arc-atomicbool)。
-pub fn create(
-    ctx: egui::Context,
-    exit_requested: Arc<AtomicBool>,
-    capture_requested: Arc<AtomicBool>,
-) -> Result<TrayIcon, String> {
-    // 菜单事件使用稳定 ID 分派；显示、扫码和退出都通过同一个原生菜单触发。
-    let show_window = MenuItem::with_id(SHOW_WINDOW_ID, "显示主窗口", true, None);
-    let capture_scan = MenuItem::with_id(CAPTURE_SCAN_ID, "截图扫码", true, None);
-    let exit_app = MenuItem::with_id(EXIT_APP_ID, "退出", true, None);
-    let menu = Menu::with_items(&[&show_window, &capture_scan, &exit_app])
-        .map_err(|error| format!("创建托盘菜单失败：{error}"))?;
+/// Run the lightweight tray host; the eframe UI starts only after a user action.
+pub fn run_host() -> Result<(), String> {
+    let (_host_mutex, host_already_running) = create_named_mutex(HOST_MUTEX)?;
+    if host_already_running {
+        start_or_activate_ui(None, false);
+        return Ok(());
+    }
 
-    let icon = Icon::from_rgba(crate::app_icon::rgba(32), 32, 32)
+    let capture_event = unsafe {
+        CreateEventW(None, false, false, wide(CAPTURE_EVENT).as_pcwstr())
+            .map_err(|error| format!("创建截图请求事件失败：{error}"))?
+    };
+    let _capture_event = OwnedHandle(capture_event);
+    let children = Arc::new(Mutex::new(None::<Child>));
+
+    let menu = Menu::with_items(&[
+        &MenuItem::with_id(SHOW_WINDOW_ID, "显示主窗口", true, None),
+        &MenuItem::with_id(CAPTURE_SCAN_ID, "截图扫码", true, None),
+        &MenuItem::with_id(EXIT_APP_ID, "退出", true, None),
+    ])
+    .map_err(|error| format!("创建托盘菜单失败：{error}"))?;
+    let icon = Icon::from_rgba(crate::app_icon::tray_rgba(), 32, 32)
         .map_err(|error| format!("创建托盘图标失败：{error}"))?;
     let tray_icon = TrayIconBuilder::new()
         .with_tooltip("桌面二维码识别")
         .with_menu(Box::new(menu))
         .with_icon(icon)
         .build()
-        .map_err(|error| format!("创建托盘图标失败：{error}"))?;
+        .map_err(|error| format!("创建系统托盘图标失败：{error}"))?;
 
-    // 托盘回调由原生窗口事件循环触发。egui::Context 可跨回调持有，并把窗口命令排入 UI。
-    let restore_context = ctx.clone();
-    tray_icon::TrayIconEvent::set_event_handler(Some(move |event| {
-        let should_restore = match event {
-            tray_icon::TrayIconEvent::DoubleClick { .. }
-            | tray_icon::TrayIconEvent::Click {
-                button: tray_icon::MouseButton::Left,
-                button_state: tray_icon::MouseButtonState::Up,
-                ..
-            } => true,
-            // 库将事件枚举标记为 non_exhaustive，未来可能追加新事件，因此保留兜底分支。
-            _ => false,
-        };
-        if should_restore {
-            restore_window(&restore_context);
-        }
-    }));
+    register_events(Arc::clone(&children));
+    start_or_activate_ui(Some(&children), false);
+    message_loop();
 
-    // 托盘回调运行在原生事件路径上，不能直接借用 UI 线程里的 QrController。
-    // 用共享的 AtomicBool 传递一次“请求截图”的信号，再唤醒 egui 处理它。
-    let menu_context = ctx;
-    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        if event.id == SHOW_WINDOW_ID {
-            restore_window(&menu_context);
-        } else if event.id == CAPTURE_SCAN_ID {
-            // store 只写入一个布尔标记，不在托盘回调中执行截图或访问 AppModel。
-            capture_requested.store(true, Ordering::SeqCst);
-            // 显示并请求重绘，确保控制器能在下一帧取走这个信号。
-            restore_window(&menu_context);
-        } else if event.id == EXIT_APP_ID {
-            // 退出菜单先标记原因，再发送关闭命令；控制器据此允许真正退出。
-            exit_requested.store(true, Ordering::SeqCst);
-            menu_context.send_viewport_cmd(egui::ViewportCommand::Close);
-            menu_context.request_repaint();
-        }
-    }));
-
-    Ok(tray_icon)
+    if let Ok(mut child) = children.lock() {
+        stop_child(&mut child);
+    }
+    drop(tray_icon);
+    Ok(())
 }
 
-fn restore_window(ctx: &egui::Context) {
-    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-    ctx.request_repaint();
+/// Hold this mutex for the lifetime of the active eframe window process.
+pub fn acquire_ui_instance() -> Result<(OwnedHandle, bool), String> {
+    create_named_mutex(UI_MUTEX)
+}
+
+/// Open the host's auto-reset event so the controller can handle tray scan requests.
+pub fn open_capture_event() -> Option<OwnedHandle> {
+    unsafe {
+        OpenEventW(
+            SYNCHRONIZATION_SYNCHRONIZE,
+            false,
+            wide(CAPTURE_EVENT).as_pcwstr(),
+        )
+        .ok()
+        .map(OwnedHandle)
+    }
+}
+
+pub fn activate_existing_ui(capture: bool) {
+    if capture {
+        signal_capture_event();
+    }
+    let _ = restore_window();
+}
+
+pub fn take_capture_request(event: Option<&OwnedHandle>) -> bool {
+    let Some(event) = event else {
+        return false;
+    };
+    unsafe { WaitForSingleObject(event.0, 0) == WAIT_OBJECT_0 }
+}
+
+fn register_events(children: Arc<Mutex<Option<Child>>>) {
+    let tray_children = Arc::clone(&children);
+    TrayIconEvent::set_event_handler(Some(move |event| {
+        if matches!(
+            event,
+            TrayIconEvent::DoubleClick { .. }
+                | TrayIconEvent::Click {
+                    button: tray_icon::MouseButton::Left,
+                    button_state: tray_icon::MouseButtonState::Up,
+                    ..
+                }
+        ) {
+            start_or_activate_ui(Some(&tray_children), false);
+        }
+    }));
+
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        if event.id == SHOW_WINDOW_ID {
+            start_or_activate_ui(Some(&children), false);
+        } else if event.id == CAPTURE_SCAN_ID {
+            start_or_activate_ui(Some(&children), true);
+        } else if event.id == EXIT_APP_ID {
+            unsafe { PostQuitMessage(0) };
+        }
+    }));
+}
+
+fn start_or_activate_ui(children: Option<&Arc<Mutex<Option<Child>>>>, capture: bool) {
+    if restore_window() {
+        if capture {
+            signal_capture_event();
+        }
+        return;
+    }
+
+    if let Some(children) = children {
+        let Ok(mut child) = children.lock() else {
+            return;
+        };
+        if let Some(running) = child.as_mut() {
+            if running.try_wait().ok().flatten().is_none() {
+                if capture {
+                    signal_capture_event();
+                }
+                return;
+            }
+            *child = None;
+        }
+        *child = spawn_ui(capture).ok();
+    } else {
+        if capture {
+            signal_capture_event();
+        }
+        let _ = spawn_ui(capture);
+    }
+}
+
+fn spawn_ui(capture: bool) -> Result<Child, String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut command = Command::new(executable);
+    command.arg("--ui");
+    if capture {
+        command.arg("--capture");
+    }
+    command
+        .spawn()
+        .map_err(|error| format!("启动主窗口失败：{error}"))
+}
+
+fn restore_window() -> bool {
+    let title = wide(WINDOW_TITLE);
+    let mut handle = HWND(0);
+    for _ in 0..20 {
+        handle = unsafe { FindWindowW(PCWSTR::null(), title.as_pcwstr()) };
+        if handle.0 != 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if handle.0 == 0 {
+        return false;
+    }
+    unsafe {
+        let _ = ShowWindow(handle, SW_RESTORE);
+        let _ = SetForegroundWindow(handle);
+    }
+    true
+}
+
+fn signal_capture_event() {
+    let Ok(event) =
+        (unsafe { OpenEventW(EVENT_MODIFY_STATE, false, wide(CAPTURE_EVENT).as_pcwstr()) })
+    else {
+        return;
+    };
+    let event = OwnedHandle(event);
+    unsafe {
+        let _ = SetEvent(event.0);
+    }
+}
+
+fn message_loop() {
+    loop {
+        let mut message = MSG::default();
+        let result = unsafe { GetMessageW(&mut message, HWND(0), 0, 0) }.0;
+        if result <= 0 {
+            break;
+        }
+        unsafe {
+            let _ = TranslateMessage(&message);
+            let _ = DispatchMessageW(&message);
+        }
+    }
+}
+
+fn stop_child(child: &mut Option<Child>) {
+    if let Some(mut child) = child.take() {
+        if child.try_wait().ok().flatten().is_none() {
+            if let Some(hwnd) = find_window() {
+                unsafe {
+                    let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn find_window() -> Option<HWND> {
+    let title = wide(WINDOW_TITLE);
+    let hwnd = unsafe { FindWindowW(PCWSTR::null(), title.as_pcwstr()) };
+    (hwnd.0 != 0).then_some(hwnd)
+}
+
+fn create_named_mutex(name: &str) -> Result<(OwnedHandle, bool), String> {
+    let name = wide(name);
+    let handle = unsafe {
+        CreateMutexW(None, false, name.as_pcwstr())
+            .map_err(|error| format!("创建单实例标记失败：{error}"))?
+    };
+    let error = unsafe { GetLastError() }
+        .err()
+        .map(|error| error.code().0 as u32);
+    Ok((OwnedHandle(handle), error == Some(0x8007_00B7)))
+}
+
+struct WideString(Vec<u16>);
+
+impl WideString {
+    fn as_pcwstr(&self) -> PCWSTR {
+        PCWSTR(self.0.as_ptr())
+    }
+}
+
+fn wide(text: &str) -> WideString {
+    WideString(text.encode_utf16().chain(Some(0)).collect())
+}
+
+pub struct OwnedHandle(HANDLE);
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
 }

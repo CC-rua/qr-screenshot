@@ -15,7 +15,80 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{path::PathBuf, sync::Arc};
 
 /// 程序入口：配置字体、读取原生窗口句柄并启动 MVC 控制器。
-fn main() -> eframe::Result {
+#[cfg(windows)]
+fn main() {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    let capture = arguments.iter().any(|argument| argument == "--capture");
+    if arguments.iter().any(|argument| argument == "--ui") {
+        let Ok((_ui_mutex, already_running)) = system_tray::acquire_ui_instance() else {
+            return;
+        };
+        if already_running {
+            system_tray::activate_existing_ui(capture);
+            return;
+        }
+        if let Err(error) = run_ui(system_tray::open_capture_event(), capture) {
+            eprintln!("主窗口启动失败：{error}");
+        }
+        return;
+    }
+
+    if let Err(error) = system_tray::run_host() {
+        eprintln!("托盘宿主启动失败：{error}");
+    }
+}
+
+#[cfg(not(windows))]
+fn main() {
+    if let Err(error) = run_native_ui() {
+        eprintln!("主窗口启动失败：{error}");
+    }
+}
+
+#[cfg(windows)]
+fn run_ui(capture_event: Option<system_tray::OwnedHandle>, start_capture: bool) -> eframe::Result {
+    eframe::run_native(
+        "桌面二维码识别",
+        eframe::NativeOptions {
+            viewport: eframe::egui::ViewportBuilder::default()
+                .with_inner_size([460.0, 600.0])
+                .with_resizable(false)
+                .with_icon(Arc::new(app_icon::icon_data())),
+            renderer: eframe::Renderer::Glow,
+            ..Default::default()
+        },
+        Box::new(move |creation_context| {
+            let system_font_found = install_system_chinese_font(&creation_context.egui_ctx);
+            // `window_handle` 来自 HasWindowHandle trait；Rust 要把 trait 引入作用域才能调用其方法。
+            // 教学笔记：[trait 与 impl](../learning-notes/rust-java-differences.md#traits-derive)。
+            let main_hwnd = {
+                creation_context
+                    .window_handle()
+                    .ok()
+                    // `Option::and_then` 把“可能没有句柄”与后续转换串起来，避免 null 检查。
+                    // 教学笔记：[Option](../learning-notes/rust-java-differences.md#option)。
+                    .and_then(|handle| match handle.as_raw() {
+                        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+                        _ => None,
+                    })
+            };
+
+            let mut controller = QrController::new(
+                main_hwnd,
+                &creation_context.egui_ctx,
+                capture_event,
+                start_capture,
+            );
+            if !system_font_found {
+                controller.set_status("未找到系统中文字体，请在 Windows 设置中安装中文字体。");
+            }
+            Ok(Box::new(controller))
+        }),
+    )
+}
+
+#[cfg(not(windows))]
+fn run_native_ui() -> eframe::Result {
     eframe::run_native(
         "桌面二维码识别",
         eframe::NativeOptions {
@@ -27,18 +100,14 @@ fn main() -> eframe::Result {
         },
         Box::new(|creation_context| {
             let system_font_found = install_system_chinese_font(&creation_context.egui_ctx);
-            // `window_handle` 来自 HasWindowHandle trait；Rust 要把 trait 引入作用域才能调用其方法。
-            // 教学笔记：[trait 与 impl](../learning-notes/rust-java-differences.md#traits-derive)。
-            let main_hwnd = creation_context
-                .window_handle()
-                .ok()
-                // `Option::and_then` 把“可能没有句柄”与后续转换串起来，避免 null 检查。
-                // 教学笔记：[Option](../learning-notes/rust-java-differences.md#option)。
-                .and_then(|handle| match handle.as_raw() {
-                    RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
-                    _ => None,
-                });
-
+            let main_hwnd =
+                creation_context
+                    .window_handle()
+                    .ok()
+                    .and_then(|handle| match handle.as_raw() {
+                        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+                        _ => None,
+                    });
             let mut controller = QrController::new(main_hwnd, &creation_context.egui_ctx);
             if !system_font_found {
                 controller.set_status("未找到系统中文字体，请在 Windows 设置中安装中文字体。");

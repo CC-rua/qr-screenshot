@@ -36,7 +36,7 @@ pub struct AppModel {
     pub(crate) overlay: Arc<Mutex<OverlayState>>,
 }
 
-/// 截图选区窗口与主窗口之间共享的一次性消息和视图状态。
+/// 截图选区遮罩与截图线程之间共享的一次性消息和视图状态。
 // AppModel 用 struct 保存状态；derive 由编译器生成 Default trait 实现，不是 Java 运行时注解。
 // 教学笔记：[struct、impl 与 derive](../learning-notes/rust-java-differences.md#struct-impl-methods)。
 #[derive(Default)]
