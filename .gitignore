@@ -1,3 +1,6 @@
 /target
 .codex
 /learning-notes
+!/learning-notes/
+learning-notes/*
+!/learning-notes/rust-java-differences.md

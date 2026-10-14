@@ -5,11 +5,16 @@ edition = "2024"
 
 [dependencies]
 eframe = "0.36.2"
-image = { version = "0.25", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
+qrcode = { version = "0.14.1", default-features = false, features = ["image"] }
 rqrr = "0.11"
 raw-window-handle = "0.6.2"
 screenshots = "0.8.10"
 windows = { version = "0.51.1", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(windows)'.dependencies]
+rfd = { version = "0.17.2", default-features = false }
+tray-icon = { version = "0.26.1", default-features = false }
 
 [profile.release]
 # 这个工具对极限运行速度不敏感，优先减小发布包体积。
